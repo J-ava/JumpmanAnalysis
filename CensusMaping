@@ -1,0 +1,186 @@
+#install.packages("maptools", repos = "http://cran.case.edu") 
+library(maptools)
+install.packages('rgeos', type='source')
+#install.packages("rgdal") #http://stackoverflow.com/questions/15248815/rgdal-package-installation
+library(rgeos)
+library(rgdal)
+library(broom)
+library(data.table)
+library(knitr)
+library(scales)
+library(ggmap)
+library(dplyr)
+
+setwd('/media/data/ala.arab/')
+jump <-read.csv('GoogleMaps/analyze_me.csv', stringsAsFactors = FALSE)
+# shape file from https://www.census.gov/cgi-bin/geo/shapefiles/index.php?year=2010&layergroup=Census+Tracts
+#this shapefile is each census track in NY state
+#ny <- maptools::readShapeLines('tl_2010_36_tract10/tl_2010_36_tract10.shp')
+ny_OGR <- readOGR(dsn = 'GoogleMaps/MapData/tl_2010_36_tract10/', 'tl_2010_36_tract10')
+plot(ny_OGR)
+
+# now we clip the data just down to the relevant counties
+#in order of county FIPs bronx, kings(Brooklyn, we go hard), New York, Queens, Richmond 
+#befoore narrowing our analysis to census tract it is helpful to limit our data to the county
+#levels included in the city limits as defined by the census 
+nyc <- ny_OGR[which(ny@data$COUNTYFP10 %in% c('005', '047', '061', '081', '085')), ]
+
+plot(nyc)
+
+#read in tabular demographic data 
+#here we are aggregating population data, age information, number of households, 
+##and averade incom by household*
+#*note, median income would have been more helful here 
+age <- read.csv('GoogleMaps/MapData/ACS_Age.csv', stringsAsFactors = FALSE)
+income <- read.csv('GoogleMaps/MapData/ACS_MeanIncome.csv', stringsAsFactors = FALSE)
+transit <- read.csv('GoogleMaps/MapData/ACS_Transit.csv', stringsAsFactors = FALSE)
+
+colnames(age)[2] <- 'GEOID10'
+colnames(income)[2] <- 'GEOID10'
+colnames(transit)[2] <- 'GEOID10'
+
+acs_data <- merge(age, income, by = 'GEOID10')
+acs_data <- merge(acs_data, transit, by = 'GEOID10')
+drop <- c('Geography.x', 'Geography.y', 'Id.x', 'Id.y', 'Geo.id')
+acs_data <- acs_data[, !(names(acs_data) %in% drop)]
+head(acs_data)
+str(acs_data)
+
+nyc@data$GEOID10 <- as.numeric(nyc@data$GEOID10)
+nyc <- merge(nyc, acs_data, by  = 'GEOID10')
+
+library(ggplot2)
+nyc_f <- fortify(nyc, region = 'GEOID10')
+nyc_f$id <- as.numeric(nyc_f$id)
+require(plyr)
+nyc_f <- arrange(nyc_f, group, order)
+library(dplyr)
+
+#first attemp at plotting age/dropoff, not much to see here
+gg_nyc <- ggplot()
+gg_nyc <- gg_nyc + geom_polygon(data = nyc_f, aes(x = long, y = lat, group = group, fill = id))
+gg_nyc <- gg_nyc + geom_point(data = jump, aes(x = dropoff_lon, y = dropoff_lat, color = 'red', size = .1))
+gg_nyc <- gg_nyc + coord_map()
+gg_nyc
+
+#heatmap of dropoff locations, seems pretty centralized
+gg1 <- ggplot()
+gg1 <- gg1 + stat_density2d(data = jump, show.legend = TRUE, 
+                            aes(x = dropoff_lon, 
+                                y = dropoff_lat,
+                                fill = ..level..,
+                                alpha = ..level..),
+                            geom = 'polygon',
+                            size = 2, bins = 20)
+
+gg1 <- gg1 + geom_polygon(data = nyc_f, aes(x= long,
+                                              y = lat, 
+                                              group = group, 
+                                              fill = NA), color = 'gray14',
+                          fill = NA,
+                          size = 0.1, show.legend = F)
+
+gg1 <- gg1 + coord_map('polyconic', xlim = c(-74.05, -73.9), ylim = c(40.7, 40.8))
+gg1 <- gg1 + scale_fill_gradient(low="deepskyblue2", 
+                                 high="firebrick1", 
+                                 space = 'Lab', name="Distribution") +
+  ggtitle('Raw - Dropoff Locations')
+gg1
+
+#heatmap of pickup locations, seems pretty centralized
+#intentionally overwriting gg 1 to save space
+gg1 <- ggplot()
+gg1 <- gg1 + stat_density2d(data = jump, show.legend = TRUE, 
+                            aes(x = pickup_lon, 
+                                y = pickup_lat,
+                                fill = ..level..,
+                                alpha = ..level..),
+                            geom = 'polygon',
+                            size = 2, bins = 20)
+
+gg1 <- gg1 + geom_polygon(data = nyc_age, aes(x= long,
+                                              y = lat, 
+                                              group = group, 
+                                              fill = NA), color = 'gray14',
+                          fill = NA,
+                          size = 0.1, show.legend = F)
+
+gg1 <- gg1 + coord_map('polyconic', xlim = c(-74.05, -73.9), ylim = c(40.7, 40.8))
+gg1 <- gg1 + scale_fill_gradient(low="deepskyblue2", 
+                                 high="firebrick1", 
+                                 space = 'Lab', name="Distribution") +
+  ggtitle('Raw - Pickup Locations')
+gg1
+
+
+#Intersect point data with census polygons 
+coords <- jump[c("dropoff_lon", "dropoff_lat")]
+dropoff_points <- SpatialPoints(coords)
+proj4string(dropoff_points) <- "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"
+proj4string(nyc) <- "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0"
+proj4string(dropoff_points)
+dropoff_by_tract <- sp::over(dropoff_points, nyc)
+dropoff_by_tract <- data.table(dropoff_by_tract)
+
+
+library(plyr)
+library(dplyr)
+dropoff_by_tract <- dropoff_by_tract %>%
+  group_by(GEOID10) %>%
+  dplyr::summarize(total = n())
+  
+
+dropoff_by_tract <- dropoff_by_tract[!is.na(dropoff_by_tract$GEOID10),]
+kable(head(dropoff_by_tract,5))
+colnames(nyc_f)[6] <- 'GEOID10'
+total_map <- left_join(factor(nyc_f), dropoff_by_tract)
+
+
+total_map <- subset(total_map, !is.na(total))
+
+gg2 <- ggplot() 
+gg2 <- gg2 +  geom_polygon(data = total_map, aes(x=long, y=lat, group=group, fill=total), color = "black", size=0.2)
+gg2 <- gg2 +  coord_map()
+gg2 <- gg2 +  scale_fill_distiller(type="seq", trans="reverse", palette = "RdPu", breaks=pretty_breaks(n=10))
+gg2 <- gg2 +  theme_nothing(legend=TRUE)
+gg2 <- gg2 +  labs(title="Dropoff by census tract", fill="")
+print(gg2)
+
+
+
+#regression analysis
+acs_data$GEOID10<- as.character(acs_data$GEOID10)
+dropoff_by_tract$GEOID10 <- as.character(dropoff_by_tract$GEOID10)
+table(dropoff_by_tract$GEOID10 %in% acs_data$GEOID10)
+full_data <- merge(acs_data, dropoff_by_tract, by.x = 'GEOID10', by.y = 'GEOID10')
+full_data <- sapply(full_data, as.numeric)
+full_data <- data.frame(full_data)
+full_data <- full_data %>%
+  mutate(
+    under20 = Under5 + Age5to9 + Age10to14 + Age15to19,
+    twenties = Age20to24 + Age25to29,
+    thirties = Age30to34 + Age35to39,
+    forties = Age40to44 + Age45to49,
+    fifties = Age50to54 + Age55to59,
+    over50 = rowSums(.[17:21]))
+
+reg <- lm(total ~ 
+             TotalPop + 
+             Mean_Income + 
+             PublicTransit + 
+             DroveAlone +
+             Carpooled +
+             under20 +
+             twenties +
+             thirties +
+             forties +
+             fifties +
+             over50, 
+          data = full_data)
+             
+        
+reg <- tidy(reg)
+reg
+write.csv(reg, 'GoogleMaps/regression.csv')
+
+summary(reg)
