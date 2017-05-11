@@ -1,0 +1,374 @@
+#APIkey <- "###########################"
+
+jump <- read.csv(file = 'GoogleMaps/analyze_me.csv', stringsAsFactors  = FALSE)
+library(gmapsdistance)
+library(dplyr)
+library(lubridate)
+library(data.table)
+library(devtools)
+library(ggplot2)
+library(tidyr)
+library(googleway)
+#install_github("SymbolixAU/googleway")
+
+#general data descriptions
+length(unique(jump$customer_id))
+#[1] 3192
+length(unique(jump$jumpman_id))
+#[1] 578
+
+#convert char to dates as needed
+to_convert <- c("when_the_delivery_started", 
+                "when_the_Jumpman_arrived_at_pickup",
+                "when_the_Jumpman_left_pickup",
+                "when_the_Jumpman_arrived_at_dropoff")
+jump <- jump %>% mutate_at(to_convert, funs(ymd_hms))
+rm(to_convert)
+
+#day of the week may be important
+jump$day_of_week <- factor(wday(jump$when_the_delivery_started))
+jump$date <- floor_date(jump$when_the_delivery_started, unit = 'day')
+
+#deliveries by date
+deliveries_by_day <- jump %>%
+  group_by(date) %>%
+  summarise(n_orders = length(unique(delivery_id)),
+            n_customers = length(unique(customer_id))) 
+
+#scatter of daily orders
+ggplot(aes(x = date, y = n_orders), data = deliveries_by_day) + 
+  geom_point() +
+  xlab("date")
+#line orders by date
+ggplot(aes(x = date, y = n_orders), data = deliveries_by_day) + 
+  geom_line() +
+  geom_point() +
+  xlab("date")
+#Wat?
+ggplot(jump, aes(x = date, y = ..density..))+
+  geom_histogram(fill = "deeppink", colour = "grey60", size = 0.2) +
+  geom_density() +
+  xlab('date')
+
+#deliveries by date regression plots
+reg_plot <- ggplot(deliveries_by_day, aes(x = date, y = n_orders))
+reg_plot + geom_point()+
+  stat_smooth( method = lm, level = .99) +
+  xlab("date")
+
+rm(reg)
+rm(reg_plot)
+
+#we definitly see a weekly trend here
+weekly_trend <- deliveries_by_day %>% mutate(
+  day_of_week = wday(date)) %>%
+  group_by(day_of_week) %>%
+  summarize(n_customers = sum(n_customers),
+            n_orders = sum(n_orders))
+
+#how are we doing attracting new customers?
+new_customers_day <- jump %>% 
+  filter(! duplicated(customer_id)) %>%
+  group_by(date) %>%
+  summarise(n_new_cust = length(unique(customer_id)))
+
+all_customers <- merge(deliveries_by_day, new_customers_day, by = 'date')
+all_customers$Pct_returning <- round(all_customers$n_new/all_customers$n_customers, digits = 3)
+rm(deliveries_by_day, new_customers_day, weekly_trend)
+max(all_customers$Pct_returning)
+rm(all_customers)
+
+n_orders_customer <- jump %>% group_by(customer_id)%>% summarise(n_orders = length(unique(delivery_id)))
+summary(n_orders_customer$n_orders)
+boxplot(n_orders_customer$n_orders)
+rm(n_orders_customer)
+
+###Data pre processing required
+#convert lat lon to be processed by Google API
+jump$origin <- paste0(jump$pickup_lat, "+", jump$pickup_lon)
+jump$destination <- paste0(jump$dropoff_lat, "+", jump$dropoff_lon)
+
+#How long doen an average order take 
+#first we have to extract the duration in seconds
+jump <-jump %>% mutate(
+  delivery_duration = as.numeric(difftime(when_the_Jumpman_arrived_at_dropoff, when_the_delivery_started, units = "mins")),
+  start_to_arr_pickup = as.numeric(difftime(when_the_Jumpman_arrived_at_pickup, when_the_delivery_started, units = 'mins')),
+  at_pickup_left_pickup = as.numeric(difftime(when_the_Jumpman_left_pickup, when_the_Jumpman_arrived_at_pickup, units = 'mins')),
+  left_pick_to_arr = as.numeric(difftime(when_the_Jumpman_arrived_at_dropoff, when_the_Jumpman_left_pickup, unit = 'mins')),
+  how_long_it_took_to_order = as.numeric(hms(how_long_it_took_to_order))/60,
+  how_long_it_took_to_order = round(how_long_it_took_to_order, 0)
+)
+
+t1 <- c("delivery_duration", "start_to_arr_pickup", "at_pickup_left_pickup", "left_pick_to_arr", "how_long_it_took_to_order")
+t2 <- rbind(summary(jump[t1]), digits = 0)
+t2 <- data.table(t2)
+rm(t2)
+
+wat <- jump %>%
+  filter(start_to_arr_pickup < 0)
+wat <- jump %>%
+  filter(is.na(when_the_Jumpman_arrived_at_pickup) == TRUE)
+rm(wat)
+
+
+
+#chain this into a mutate statement
+jump <- jump %>% mutate(
+  transit_type = if_else(vehicle_type %in% c('van', 'truck', 'car', 'scooter', 'motorcycle'), 
+                         "driving", vehicle_type),
+  transit_type = ifelse(vehicle_type == 'walker', 'walking', transit_type),
+  transit_type = if_else(vehicle_type == 'bicycle', 'bicycling', transit_type)
+)
+
+#plotting probability density of delivery duration 
+ggplot(jump, aes(x= delivery_duration)) + geom_density()
+#vs. observed hisogram
+#delivery duration TOTAL
+dd_plot <- 
+  ggplot(jump, aes( x= delivery_duration, y = ..density..)) + 
+  geom_histogram(fill = "deeppink", colour = "grey60", size = 0.2) +
+  geom_density() +
+  xlim(0, 200)
+
+dd_plot + facet_grid(vehicle_type ~.)
+dd_plot + facet_grid(transit_type ~.)
+
+#delivery transit times
+tt_plot <- 
+  ggplot(jump, aes( x= left_pick_to_arr, y = ..density..)) + 
+  geom_histogram(fill = "deeppink", colour = "grey60", size = 0.2) +
+  geom_density() +
+  xlim(0, 50) +
+  xlab('Leaving Pickup to Arrival at Dropoff, (mins)')
+
+tt_plot + facet_grid(vehicle_type ~.)
+tt_plot + facet_grid(transit_type ~.)
+
+durr_by_vehicle <- jump %>% group_by(vehicle_type) %>% summarise(durr = mean(delivery_duration))
+durr_by_transit <- jump %>% group_by(transit_type) %>% summarise(durr = mean(delivery_duration))
+rm(durr_by_transit, durr_by_vehicle)
+
+
+#assing interpretibale transit methods
+table(jump$vehicle_type)
+
+
+#make small test data to not exceed query limit
+# gmapsdistance::set.api.key("AIzaSyAjg7sXtLUmd3_0XRc48CUxV5St1EdoRoY")
+# gmapsdistance(origin = from, destination = to, mode = 'driving', key = APIkey)
+
+#filter each type of delivery to be passed to the google API
+driving <- jump %>% filter(
+  transit_type == 'driving')
+
+bike <- jump %>% filter(
+  transit_type == 'bicycling'
+)
+walk <- jump %>% filter(
+  transit_type == 'walking'
+)
+
+
+APIkey <- "#################"
+
+drive_times <- googleway::google_distance(origins = driving$origin[1:10],
+                                          destinations = driving$destination[1:10],
+                                          mode = "driving", 
+                                          key = APIkey,
+                                          units = 'imperial'
+                                          )
+##################
+distance.text    distance.value    duration.text   duration.value    duration_in_traffic.text   duration_in_traffic. value status
+1         1.0 mi           1603        9 mins            516                   6 mins                       369     OK
+2         1.6 mi           2614       13 mins            794                   9 mins                       568     OK
+3         8.7 mi          14065       24 mins           1467                  22 mins                      1290     OK
+4         2.9 mi           4606       20 mins           1187                  14 mins                       840     OK
+5         0.8 mi           1340        6 mins            387                   5 mins                       306     OK
+6         3.5 mi           5683       16 mins            962                  14 mins                       817     OK
+7         0.9 mi           1495        8 mins            493                   6 mins                       366     OK
+8         1.1 mi           1815        7 mins            407                   4 mins                       269     OK
+9         3.0 mi           4846       23 mins           1386                  14 mins                       864     OK
+10        1.6 mi           2544       14 mins            837                  10 mins                       610     OK
+
+#extract predicted drive time from google API for first 100 driving records
+i <- 0
+n <- 100
+result <- data.frame(x = numeric(n), y = character(n), stringsAsFactors = FALSE)
+
+for(i in 1:100){
+  
+  current <- googleway::google_distance(origins = driving$origin[i],
+                                        destinations = driving$destination[i],
+                                        mode = "driving", 
+                                        key = APIkey,
+                                        units = 'imperial'
+  )
+  result$distance_value[i] <- unlist(current$rows$elements)[['distance.value']]
+  result$duration_text[i] <- unlist(current$rows$elements)[['duration.text']]
+  result$duration_val[i] <- unlist(current$rows$elements)[['duration.value']]
+  result$duration_traffic[i] <- unlist(current$rows$elements)[['duration_in_traffic.text']]
+  result$duration_traffic_val[i] <- unlist(current$rows$elements)[['duration_in_traffic.value']]
+}
+
+driving_results <- result
+
+#extract predicted drive time from google API for first 100 biking records
+i <- 0
+n <- 100
+result <- data.frame(x = numeric(n), y = character(n), stringsAsFactors = FALSE)
+
+for(i in 1:100){
+  
+  current <- googleway::google_distance(origins = bike$origin[i],
+                                        destinations = bike$destination[i],
+                                        mode = "bicycling", 
+                                        key = APIkey,
+                                        units = 'imperial'
+  )
+  result$distance_value[i] <- unlist(current$rows$elements)[['distance.value']]
+  result$duration_text[i] <- unlist(current$rows$elements)[['duration.text']]
+  result$duration_val[i] <- unlist(current$rows$elements)[['duration.value']]
+}
+
+biking_results <- result
+
+#extract predicted drive time from google API for first 100 walking records
+i <- 0
+n <- 100
+result <- data.frame(x = numeric(n), y = character(n), stringsAsFactors = FALSE)
+
+for(i in 1:100){
+  
+  current <- googleway::google_distance(origins = walk$origin[i],
+                                        destinations = walk$destination[i],
+                                        mode = "walking", 
+                                        key = APIkey,
+                                        units = 'imperial'
+  )
+  result$distance_value[i] <- unlist(current$rows$elements)[['distance.value']]
+  result$duration_text[i] <- unlist(current$rows$elements)[['duration.text']]
+  result$duration_val[i] <- unlist(current$rows$elements)[['duration.value']]
+}
+
+walking_results <- result
+
+#Comparing google predicted times to results DRIVING
+
+drive_results <- cbind(driving[1:100,], driving_results)
+rm(driving_results)
+drive_results <- drive_results %>%
+  mutate(duration_val = as.numeric(duration_val),
+         duration_traffic_val = as.numeric(duration_traffic_val))
+drive_results <- drive_results %>%
+  mutate(duration_val = duration_val/60,
+         duration_traffic_val = duration_traffic_val/60, 
+         durr_diff = left_pick_to_arr - duration_val)
+summary(drive_results$durr_diff)
+
+drive_plot <- drive_results %>%
+  select(left_pick_to_arr, durr_diff, duration_val)
+drive_plot <- reshape2::melt(drive_plot)
+
+ggplot(drive_plot, aes(x = value, fill = variable)) + 
+  geom_density(alpha = .3) +
+  xlab('minutes') + 
+  ggtitle('Drive Time Analysis') +
+  scale_fill_discrete(labels = c('time from departing pickup to arrival',
+                                 'time difference between API',
+                                 'predicted travel duration')) 
+
+ggplot(drive_plot, aes(x = variable, y = value)) +
+  geom_boxplot()+
+  scale_fill_discrete(labels = c('time from departing pickup to arrival',
+                                 'time difference between API',
+                                 'predicted travel duration')) 
+drive_plot %>% 
+  group_by(variable)%>%
+  summarise(
+    min = round(min(value, na.rm =TRUE), 0),
+    mean = round(mean(value, na.rm = TRUE),0),
+    sd = round(sd(value, na.rm = TRUE),0),
+    median = round(median(value, na.rm = TRUE),0),
+    IQR1 = round(quantile(value, na.rm = TRUE, .25),0),
+    IQR2 = round(quantile(value, na.rm = TRUE, .75), 0))
+
+#Comparing google predicted times to results BIKING
+biking_results <- cbind(bike[1:100,], biking_results)
+biking_results <- biking_results %>%
+  mutate(duration_val = as.numeric(duration_val))
+
+biking_results <- biking_results %>%
+  mutate(duration_val = duration_val/60,
+         durr_diff = left_pick_to_arr - duration_val)
+summary(biking_results$durr_diff)
+
+bike_plot <- biking_results %>%
+  select(left_pick_to_arr, durr_diff, duration_val)
+bike_plot <- reshape2::melt(bike_plot)
+
+ggplot(bike_plot, aes(x = value, fill = variable)) + 
+  geom_density(alpha = .3) +
+  xlab('minutes') + 
+  ggtitle('Bicycling Time Analysis') +
+  scale_fill_discrete(labels = c('time from departing pickup to arrival',
+                                 'time difference between API',
+                                 'predicted travel duration')) 
+
+ggplot(bike_plot, aes(x = variable, y = value)) +
+  geom_boxplot()+
+  scale_fill_discrete(labels = c('time from departing pickup to arrival',
+                                 'time difference between API',
+                                 'predicted travel duration')) 
+bike_plot %>% 
+  group_by(variable)%>%
+  summarise(
+    min = round(min(value, na.rm =TRUE), 0),
+    IQR1 = round(quantile(value, na.rm = TRUE, .25),0),
+    mean = round(mean(value, na.rm = TRUE),0),
+    median = round(median(value, na.rm = TRUE),0),
+    IQR3 = round(quantile(value, na.rm = TRUE, .75), 0),
+    sd = round(sd(value, na.rm = TRUE),0))
+
+
+
+#Comparing google predicted times to results WALKING
+walking_results <- cbind(walk[1:100,], result)
+walking_results <- walking_results %>%
+  mutate(duration_val = as.numeric(duration_val))
+
+walking_results <- walking_results %>%
+  mutate(duration_val = duration_val/60,
+         durr_diff = left_pick_to_arr - duration_val)
+summary(walking_results$durr_diff)
+
+walk_plot <- walking_results %>%
+  select(left_pick_to_arr, durr_diff, duration_val)
+walk_plot <- reshape2::melt(walk_plot)
+
+ggplot(walk_plot, aes(x = value, fill = variable)) + 
+  geom_density(alpha = .3) +
+  xlab('minutes') + 
+  ggtitle('Walking Time Analysis') +
+  scale_fill_discrete(labels = c('time from departing pickup to arrival',
+                                 'time difference between API',
+                                 'predicted travel duration')) 
+
+ggplot(walk_plot, aes(x = variable, y = value)) +
+  geom_boxplot()+
+  scale_fill_discrete(labels = c('time from departing pickup to arrival',
+                                 'time difference between API',
+                                 'predicted travel duration')) 
+walk_plot %>% 
+  group_by(variable)%>%
+  summarise(
+    min = round(min(value, na.rm =TRUE), 0),
+    IQR1 = round(quantile(value, na.rm = TRUE, .25),0),
+    mean = round(mean(value, na.rm = TRUE),0),
+    median = round(median(value, na.rm = TRUE),0),
+    IQR3 = round(quantile(value, na.rm = TRUE, .75), 0),
+    sd = round(sd(value, na.rm = TRUE),0))
+
+#some cleanup
+rm(bike, bike_plot, biking_results, drive_plot, drive_results, driving, jumpman_avg, result, walk, walk_plot, walking_results)
+rm(APIkey, current, drive_times, i, n, t, t1, tt_plot, x, dd_plot)
+
